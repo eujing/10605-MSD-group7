@@ -1,9 +1,7 @@
-import h5py
 import os
-import boto3 
+import h5py
 import tempfile
-import pandas as pd
-
+import boto3
 
 def process_h5_file(h5_file):
     """Do the processing of what fields you'll use here.
@@ -67,37 +65,51 @@ def process_h5_file(h5_file):
     line.append(str(h5_file['analysis']['songs']['time_signature_confidence'][0]))
     line.append(str(h5_file['musicbrainz']['songs']['year'][0]))
 
-    print(','.join(line))
+    return ','.join(line)
 
-
-def transform_local(path):
-    '''
+def read_and_process(key, bucket='millionsongs10605'):
+    s3 = boto3.client('s3')
+    filename = '/tmp/' + key.split('/')[-1]
+    string = ''
     try:
-        with h5py.File(path, 'r+') as h5:
-#            return process_h5_file(h5)
-            process_h5_file(h5)
+        s3.download_file(bucket, key, filename)
+        with h5py.File(filename, 'r') as h5:
+            string = process_h5_file(h5)
+        os.remove(filename)
+        return string
     except Exception:
-        return []
-    '''
-    with h5py.File(path, 'r+') as h5:
-        process_h5_file(h5)
-
-def rows_to_file(rows):
-    # Write some code to save a list of rows into a temporary CSV (or whatever format)
-    # for example using pandas.
-    transform_local(rows[0])
-
+        if os.path.exists(filename):
+            os.remove(filename)
+        return ''
     
-# If using the local volume:
-processed = []
-chunk_size = 1
 
-for root, dirs, files in os.walk('./data'):
-    for f in files:
-        processed.append(os.path.join(root, f))
+def get_prefixes(bucket='millionsongs10605', prefix='data/'):
+    # In order to run with multiple threads/machines at a time, the prefix could be set to different things,
+    # to make sure there is no overlap. For example, 'million-song/data/A', 'million-song/data/B', ...
+    
+    s3 = boto3.client('s3')
+
+    response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+
+    prefixes = [content['Key'] for content in response['Contents']]
+
+    while response['IsTruncated']:
+        response = s3.list_objects_v2(Bucket=bucket, 
+                                      Prefix=prefix, 
+                                      ContinuationToken=response['NextContinuationToken'])
+        prefixes.extend([content['Key'] for content in response['Contents']])
         
-        if len(processed) % chunk_size == 0:
-            rows_to_file(processed) 
-            # upload to s3. make sure to not overwrite the name
-            processed = []
-            
+    return prefixes
+
+def main():
+    pre = 'data/'
+    fixes = [chr(ord('A') + i) for i in range(26)]
+
+    for fix in fixes:
+        print('Starting ' + fix)
+        prefix = pre + fix
+        filepaths = sc.parallelize(get_prefixes(prefix=prefix))
+        csv = filepaths.map(read_and_process).filter(lambda x: x != '')
+        csv.saveAsTextFile('s3://millionsongs10605-csv/' + fix)
+
+main()
